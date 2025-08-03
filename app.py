@@ -1,34 +1,34 @@
 import streamlit as st
-import pandas as pd
-import numpy as np
-import pickle
-from datetime import datetime
+import requests
+from datetime import datetime, timedelta
+import os
+from dotenv import load_dotenv
+from amadeus import Client, ResponseError
 
-st.title("✈️ Flight Price Predictor")
-st.write("Powered by a Machine Learning Model")
-st.info("Note: This tool predicts prices based on historical data, it does not show live fares.")
+st.title("✈️ Real-Time Flight Price Finder")
+st.write("Powered by Amadeus API")
 
-# --- Load the trained machine learning model ---
+# --- Load Amadeus API credentials ---
 try:
-    # Use a relative path to find the model in the same directory
-    with open("flight_price_rf.pkl", "rb") as model_file:
-        model = pickle.load(model_file)
+    load_dotenv()
+    amadeus_api_key = os.getenv("AMADEUS_API_KEY")
+    amadeus_api_secret = os.getenv("AMADEUS_API_SECRET")
     
-    # Get the exact feature names from the model
-    if hasattr(model, 'feature_names_in_'):
-        model_features = model.feature_names_in_
-        st.write("Model loaded successfully!")
+    # Check if credentials are available
+    if not amadeus_api_key or not amadeus_api_secret:
+        st.error("❌ Amadeus API credentials not properly configured. Please check your .env file.")
+        st.info("You need both AMADEUS_API_KEY and AMADEUS_API_SECRET in your .env file.")
+        amadeus = None
     else:
-        st.error("Model doesn't have feature names attribute.")
-        st.stop()
-    
-except FileNotFoundError:
-    st.error("❌ Model file 'flight_price_rf.pkl' not found.")
-    st.write("Please make sure the model file is in the same directory as this script.")
-    st.stop()
-except Exception as e:
-    st.error(f"An error occurred while loading the model: {e}")
-    st.stop()
+        # Initialize Amadeus client
+        amadeus = Client(
+            client_id=amadeus_api_key,
+            client_secret=amadeus_api_secret
+        )
+        st.success("✅ Connected to Amadeus API")
+except ImportError:
+    st.error("❌ Required packages not installed. Please run: pip install python-dotenv amadeus")
+    amadeus = None
 
 
 # --- User Inputs ---
@@ -36,121 +36,96 @@ col1, col2 = st.columns(2)
 
 with col1:
     origin = st.selectbox("From (Airport Code)", ["DEL", "BOM", "BLR", "MAA", "CCU"], index=0)
-    departure_date = st.date_input("Departure Date", datetime.now())
+    departure_date = st.date_input("Departure Date", datetime.now() + timedelta(days=7))  # Default to 1 week from now
 
 with col2:
     destination = st.selectbox("To (Airport Code)", ["BLR", "DEL", "COK", "HYD"], index=0)
     adults = st.number_input("Number of Adults", min_value=1, max_value=9, value=1)
 
+# Add currency selection
+currency = st.selectbox("Currency", options=["INR", "USD", "EUR", "GBP"], index=0)
 
-if st.button("Predict Flight Prices"):
-    st.write(f"Predicting prices for flights from {origin} to {destination}...")
-
-    # --- Prepare data for the model ---
-    # The model expects specific numerical inputs, so we must convert the user's choices.
-
-    # 1. Date of Journey
-    journey_day = departure_date.day
-    journey_month = departure_date.month
-
-    # 2. Airline mapping to full names
-    # We will predict for a few major airlines to give a range of options.
-    airlines = ["IndiGo", "Air India", "SpiceJet", "Vistara", "GoAir"]
-    
-    # 3. Source and Destination mapping
-    source_mapping = {
-        'BOM': 'Mumbai', 
-        'BLR': 'Bangalore', # Bangalore is the reference category (not in features)
-        'DEL': 'Delhi', 
-        'CCU': 'Kolkata', 
-        'MAA': 'Chennai'
-    }
-    
-    dest_mapping = {
-        'COK': 'Cochin', 
-        'BLR': 'Bangalore', # Bangalore is the reference category (not in features)
-        'DEL': 'Delhi', 
-        'HYD': 'Hyderabad'
-    }
-
-    source_name = source_mapping.get(origin)
-    dest_name = dest_mapping.get(destination)
-
-    if source_name is None or dest_name is None:
-        st.error("The selected origin or destination is not supported by this model.")
-        st.stop()
-
-    # --- Generate Predictions for Different Airlines ---
-    predictions = []
-    
-    # We'll create some sample times for prediction (same for all airlines)
-    dep_hour, dep_min = (9, 30) # Morning
-    arrival_hour, arrival_min = (12, 15) # Afternoon
-    duration_hours = arrival_hour - dep_hour
-    duration_mins = arrival_min - dep_min if arrival_min >= dep_min else (arrival_min + 60 - dep_min)
-    
-    for airline_name in airlines:
-        try:
-            # Create a DataFrame with all features initialized to 0
-            features_df = pd.DataFrame(0, index=[0], columns=model_features)
-            
-            # Set the non-categorical features
-            features_df['Total_Stops'] = 0  # Assuming non-stop
-            features_df['Journey_day'] = journey_day
-            features_df['Journey_month'] = journey_month
-            features_df['Dep_hour'] = dep_hour
-            features_df['Dep_min'] = dep_min
-            features_df['Arrival_hour'] = arrival_hour
-            features_df['Arrival_min'] = arrival_min
-            features_df['Duration_hours'] = duration_hours
-            features_df['Duration_mins'] = duration_mins
-            
-            # Set the airline feature (one-hot encoded)
-            airline_col = f'Airline_{airline_name}'
-            if airline_col in features_df.columns:
-                features_df[airline_col] = 1
-            
-            # Set the source feature (one-hot encoded)
-            # Note: Bangalore is the reference category and doesn't have a column
-            if source_name != 'Bangalore':
-                source_col = f'Source_{source_name}'
-                if source_col in features_df.columns:
-                    features_df[source_col] = 1
-            
-            # Set the destination feature (one-hot encoded)
-            # Note: Bangalore is the reference category and doesn't have a column
-            if dest_name != 'Bangalore':
-                dest_col = f'Destination_{dest_name}'
-                if dest_col in features_df.columns:
-                    features_df[dest_col] = 1
-            
-            # Optional: Display the features for debugging
-            # st.write(f"Features for {airline_name}:", features_df)
-
-            # Predict the price
-            prediction = model.predict(features_df)[0]
-            predictions.append({
-                "airline": airline_name,
-                "price": int(prediction * adults) # Adjust for number of adults
-            })
-        except Exception as e:
-            st.warning(f"Could not generate prediction for {airline_name}. Error: {e}")
-            st.write("Error details:", str(e))
-
-    # --- Display Results ---
-    if predictions:
-        st.success(f"Found {len(predictions)} predicted flight options!")
-        
-        # Sort by price
-        predictions.sort(key=lambda x: x["price"])
-        
-        for flight in predictions:
-            st.markdown("---")
-            st.subheader(f"Airline: {flight['airline']}")
-            st.write(f"**Predicted Price:** ₹{flight['price']:,} (for {adults} adult(s))")
-            st.write("Departure: Morning (Sample)")
-            st.write("Arrival: Afternoon (Sample)")
-            st.write("Stops: Non-stop (Sample)")
-
+if st.button("Search for Flights"):
+    if amadeus is None:
+        st.error("❌ Amadeus client not initialized. Please check your API credentials.")
     else:
-        st.warning("Could not generate any price predictions for the selected criteria.")
+        st.write(f"Searching for flights from {origin} to {destination} on {departure_date.strftime('%Y-%m-%d')}...")
+        
+        try:
+            # Format date as YYYY-MM-DD for Amadeus API
+            formatted_date = departure_date.strftime("%Y-%m-%d")
+            
+            # Call Amadeus Flight Offers Search API
+            flight_offers = amadeus.shopping.flight_offers_search.get(
+                originLocationCode=origin,
+                destinationLocationCode=destination,
+                departureDate=formatted_date,
+                adults=adults,
+                currencyCode=currency,
+                max=5  # Limit to 5 results
+            )
+            
+            # Process and display results
+            if flight_offers.data:
+                st.success(f"Found {len(flight_offers.data)} flights!")
+                
+                for offer in flight_offers.data:
+                    # Extract price
+                    price = offer['price']['total']
+                    currency_code = offer['price']['currency']
+                    
+                    # Extract itinerary details
+                    itinerary = offer['itineraries'][0]  # First itinerary (outbound)
+                    segments = itinerary['segments']
+                    
+                    # Get first and last segment for departure and arrival times
+                    first_segment = segments[0]
+                    last_segment = segments[-1]
+                    
+                    # Extract carrier code
+                    carrier_code = first_segment['carrierCode']
+                    
+                    # Format departure and arrival times
+                    departure_time = datetime.strptime(
+                        first_segment['departure']['at'], 
+                        "%Y-%m-%dT%H:%M:%S"
+                    ).strftime('%I:%M %p')
+                    
+                    arrival_time = datetime.strptime(
+                        last_segment['arrival']['at'], 
+                        "%Y-%m-%dT%H:%M:%S"
+                    ).strftime('%I:%M %p')
+                    
+                    # Number of stops
+                    stops = len(segments) - 1
+                    stop_text = "non-stop" if stops == 0 else f"{stops} stop{'s' if stops > 1 else ''}"
+                    
+                    # Display flight information
+                    st.markdown("---")
+                    st.subheader(f"Price: {currency_code} {price}")
+                    st.write(f"**Airline:** {carrier_code}")
+                    st.write(f"**Departure:** {departure_time} from {first_segment['departure']['iataCode']}")
+                    st.write(f"**Arrival:** {arrival_time} at {last_segment['arrival']['iataCode']}")
+                    st.write(f"**Stops:** {stop_text}")
+                    
+                    # Display flight details in an expander
+                    with st.expander("View Flight Details"):
+                        for i, segment in enumerate(segments):
+                            st.write(f"**Segment {i+1}:**")
+                            st.write(f"From: {segment['departure']['iataCode']} at {datetime.strptime(segment['departure']['at'], '%Y-%m-%dT%H:%M:%S').strftime('%I:%M %p')}")
+                            st.write(f"To: {segment['arrival']['iataCode']} at {datetime.strptime(segment['arrival']['at'], '%Y-%m-%dT%H:%M:%S').strftime('%I:%M %p')}")
+                            st.write(f"Flight: {segment['carrierCode']} {segment['number']}")
+                            st.write(f"Duration: {segment['duration']}")
+                            if i < len(segments) - 1:
+                                st.write("---")
+                    
+                    # Add a booking button (simulated)
+                    if st.button(f"Book this flight for {currency_code} {price}", key=f"book_{flight_offers.data.index(offer)}"):
+                        st.success("Booking simulation successful! (This is a demo)")
+            else:
+                st.warning("No flights found for the selected criteria.")
+                
+        except ResponseError as error:
+            st.error(f"Amadeus API Error: {error}")
+        except Exception as e:
+            st.error(f"Error: {str(e)}")
